@@ -13,10 +13,11 @@ require('qfedit').setup({
   hijack = true,          -- replace native quickfix windows opened by :copen
   layout = 'horizontal',  -- 'horizontal', 'vertical', or 'float'
   autosave = true,        -- sync changes when returning to Normal mode
+  highlight = true,       -- color path, filename, position and diagnostics
 })
 ```
 
-All values shown are defaults. Setting `hijack = false` retains the original behavior: native `:copen` works normally and `:QfEdit` opens the editable buffer explicitly.
+All values shown are defaults. `highlight = true` uses extmarks to color directories, filenames, positions and diagnostic messages without changing buffer text. It follows your colorscheme's standard highlight groups. Override `QfEditDirectory`, `QfEditFilename`, `QfEditPosition`, `QfEditSeparator`, `QfEditMessage`, `QfEditError`, `QfEditWarning`, `QfEditInfo` and `QfEditHint` to customize the look. Setting `highlight = false` disables these decorations. Setting `hijack = false` retains the original behavior: native `:copen` works normally and `:QfEdit` opens the editable buffer explicitly.
 
 `autosave = true` saves after Normal-mode buffer modifications and upon `InsertLeave`. `:w` remains available for manual synchronization. External quickfix modifications are protected by a changedtick conflict check.
 
