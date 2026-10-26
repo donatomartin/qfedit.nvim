@@ -1,6 +1,6 @@
 local M = {}
 local sessions = {}
-local defaults = { hijack = true, layout = 'horizontal', autosave = true }
+local defaults = { hijack = true, layout = 'horizontal', autosave = true, highlight = true }
 local config = vim.deepcopy(defaults)
 local setup_done = false
 local saving = {}
@@ -47,6 +47,797 @@ local function open_window(buf, layout, replace_win)
   local win = vim.api.nvim_get_current_win()
   protect_window(win)
   return win
+end
+
+
+-- Extmarks change appearance without changing editable buffer contents.
+local ns = vim.api.nvim_create_namespace('qfedit_highlights')
+local function set_highlights()
+  vim.api.nvim_set_hl(0, 'QfEditDirectory', { default = true, link = 'Comment' })
+  vim.api.nvim_set_hl(0, 'QfEditFilename', { default = true, link = 'Directory' })
+  vim.api.nvim_set_hl(0, 'QfEditPosition', { default = true, link = 'Number' })
+  vim.api.nvim_set_hl(0, 'QfEditSeparator', { default = true, link = 'Delimiter' })
+  vim.api.nvim_set_hl(0, 'QfEditMessage', { default = true, link = 'Normal' })
+  vim.api.nvim_set_hl(0, 'QfEditError', { default = true, link = 'DiagnosticError' })
+  vim.api.nvim_set_hl(0, 'QfEditWarning', { default = true, link = 'DiagnosticWarn' })
+  vim.api.nvim_set_hl(0, 'QfEditInfo', { default = true, link = 'DiagnosticInfo' })
+  vim.api.nvim_set_hl(0, 'QfEditHint', { default = true, link = 'DiagnosticHint' })
+end
+
+local function colorize(buf)
+  if not vim.api.nvim_buf_is_valid(buf) then return end
+  vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)
+  if not config.highlight then return end
+  local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+  local session = sessions[buf]
+  for i, line in ipairs(lines) do
+    local row = i - 1
+    local prefix, message = line:match('^(.-)( | )(.*)
+  vim.notify('qfedit: ' .. message, vim.log.levels.ERROR)
+end
+
+local function path_for(item)
+  if not item.bufnr or item.bufnr == 0 then return '' end
+  local name = vim.api.nvim_buf_get_name(item.bufnr)
+  if name == '' then return '' end
+  return vim.fn.fnamemodify(name, ':p')
+end
+
+local function render(item)
+  local path = path_for(item)
+  local pos = ''
+  if (item.lnum or 0) > 0 then
+    pos = ':' .. item.lnum
+    if (item.col or 0) > 0 then pos = pos .. ':' .. item.col end
+  end
+  local message = (item.text or ''):gsub('[\r\n]+', ' ')
+  if message ~= '' then return path .. pos .. ' | ' .. message end
+  return path .. pos
+end
+
+local function parse(line)
+  local lhs, message = line:match('^(.-) | (.*)$')
+  if not lhs then lhs, message = line, '' end
+  lhs = vim.trim(lhs)
+  local path, lnum, col = lhs:match('^(.*):(%d+):(%d+)$')
+  if not path then path, lnum = lhs:match('^(.*):(%d+)$') end
+  if not path then path = lhs end
+  if path == '' then return nil, 'missing filename: ' .. line end
+  return {
+    filename = path,
+    lnum = tonumber(lnum) or 1,
+    col = tonumber(col) or 1,
+    text = message,
+    valid = 1,
+  }
+end
+
+local function current(id)
+  return vim.fn.getqflist({ id = id, items = 1, changedtick = 1, title = 1, idx = 1 })
+end
+
+local function save(buf, quiet)
+  local session = sessions[buf]
+  if not session then return fail('unknown editor buffer') end
+  if saving[buf] then return end
+  if not vim.bo[buf].modified then return true end
+  local list = current(session.id)
+  if list.id ~= session.id then return fail('the original quickfix list no longer exists') end
+  if list.changedtick ~= session.tick then
+    return fail('quickfix list changed externally; use :QfEdit to reopen it (your edits were NOT overwritten)')
+  end
+
+  local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+  local pools = {}
+  for i, original in ipairs(session.lines) do
+    pools[original] = pools[original] or {}
+    table.insert(pools[original], vim.deepcopy(session.items[i]))
+  end
+
+  local output = {}
+  local saved_lines = {}
+  for _, line in ipairs(lines) do
+    if vim.trim(line) ~= '' then
+      local pool = pools[line]
+      local item
+      if pool and #pool > 0 then
+        item = table.remove(pool, 1)
+      else
+        local err
+        item, err = parse(line)
+        if not item then return fail(err) end
+      end
+      table.insert(output, item)
+      table.insert(saved_lines, line)
+    end
+  end
+
+  -- Replace the ORIGINAL quickfix list by ID rather than implicitly changing
+  -- whichever list happens to be active after opening this buffer.
+  local properties = { id = session.id, items = output, title = list.title }
+  if #output > 0 then properties.idx = math.max(1, math.min(list.idx, #output)) end
+  saving[buf] = true
+  local result = vim.fn.setqflist({}, 'r', properties)
+  saving[buf] = nil
+  if result ~= 0 then return fail('failed to update the quickfix list') end
+
+  local refreshed = current(session.id)
+  if refreshed.id ~= session.id then return fail('quickfix list disappeared after saving') end
+  session.tick = refreshed.changedtick
+  session.items = vim.deepcopy(refreshed.items)
+  session.lines = saved_lines
+  vim.bo[buf].modified = false
+  if not quiet then
+    vim.notify(('qfedit: saved %d entries'):format(#output))
+  end
+  return true
+end
+
+local function queue_save(buf)
+  if not config.autosave or pending[buf] or saving[buf] then return end
+  pending[buf] = true
+  vim.schedule(function()
+    pending[buf] = nil
+    if not vim.api.nvim_buf_is_valid(buf) or not vim.bo[buf].modified then return end
+    -- InsertLeave is emitted when typing stops; TextChanged captures dd, p,
+    -- :sort, etc. Never write while the user is actively inserting text.
+    local mode = vim.api.nvim_get_mode().mode
+    if mode:sub(1, 1) == 'i' or mode:sub(1, 1) == 'R' then return end
+    save(buf, true)
+  end)
+end
+
+function M.open(opts)
+  opts = opts or {}
+  local layout = opts.layout or config.layout
+  local replace_win = opts.replace_win
+  local qf = vim.fn.getqflist({ id = 0, items = 1, changedtick = 1, title = 1 })
+  if not qf.id or qf.id == 0 then return fail('no current quickfix list') end
+
+  local existing
+  for buf, session in pairs(sessions) do
+    if session.id == qf.id and vim.api.nvim_buf_is_valid(buf) then
+      existing = buf
+      break
+    end
+  end
+  if existing then
+    open_window(existing, layout, replace_win)
+    return existing
+  end
+
+  local buf = vim.api.nvim_create_buf(false, false)
+  open_window(buf, layout, replace_win)
+  vim.bo[buf].buftype = 'acwrite'
+  vim.bo[buf].bufhidden = 'hide'
+  vim.bo[buf].swapfile = false
+  vim.bo[buf].filetype = 'qfedit'
+  vim.api.nvim_buf_set_name(buf, ('qfedit://%d'):format(qf.id))
+
+  local lines = {}
+  for _, item in ipairs(qf.items) do table.insert(lines, render(item)) end
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+  vim.bo[buf].modified = false
+
+  sessions[buf] = {
+    id = qf.id,
+    tick = qf.changedtick,
+    items = vim.deepcopy(qf.items),
+    lines = vim.deepcopy(lines),
+  }
+
+  colorize(buf)
+  local group = vim.api.nvim_create_augroup('QfEdit_' .. buf, { clear = true })
+  vim.api.nvim_create_autocmd('BufWriteCmd', {
+    buffer = buf,
+    group = group,
+    callback = function() save(buf, false) end,
+  })
+  vim.api.nvim_create_autocmd({ 'TextChanged', 'TextChangedI', 'InsertLeave' }, {
+    buffer = buf,
+    group = group,
+    callback = function(args)
+      colorize(args.buf)
+      if args.event ~= 'TextChangedI' then queue_save(args.buf) end
+    end,
+  })
+  vim.api.nvim_create_autocmd('BufWipeout', {
+    buffer = buf,
+    group = group,
+    callback = function() sessions[buf] = nil; pending[buf] = nil end,
+  })
+
+  vim.keymap.set('n', '<CR>', function()
+    local line = vim.api.nvim_get_current_line()
+    if vim.trim(line) == '' then return end
+    local item = parse(line)
+    if not item then return end
+    local target = vim.api.nvim_get_current_win()
+    if vim.api.nvim_win_get_config(target).relative ~= '' then
+      vim.api.nvim_win_close(target, true)
+    else
+      vim.cmd('wincmd p')
+    end
+    -- If the previous window was also an editor, create an ordinary
+    -- source window instead of clobbering a protected qfedit window.
+    if vim.bo[0].filetype == 'qfedit' then
+      vim.cmd('new')
+    end
+    vim.cmd('edit ' .. vim.fn.fnameescape(item.filename))
+    local nlines = vim.api.nvim_buf_line_count(0)
+    local row = math.max(1, math.min(item.lnum, nlines))
+    local text = vim.api.nvim_buf_get_lines(0, row - 1, row, false)[1] or ''
+    local col = math.max(0, math.min(item.col - 1, #text))
+    vim.api.nvim_win_set_cursor(0, { row, col })
+  end, { buffer = buf, desc = 'Open quickfix entry' })
+  return buf
+end
+
+function M.setup(opts)
+  opts = opts or {}
+  local merged = vim.tbl_deep_extend('force', vim.deepcopy(defaults), opts)
+  assert(type(merged.hijack) == 'boolean', 'qfedit: hijack must be boolean')
+  assert(type(merged.autosave) == 'boolean', 'qfedit: autosave must be boolean')
+  assert(type(merged.highlight) == 'boolean', 'qfedit: highlight must be boolean')
+  assert(vim.tbl_contains({ 'horizontal', 'vertical', 'float' }, merged.layout),
+    'qfedit: layout must be horizontal, vertical, or float')
+  config = merged
+  set_highlights()
+  for buf in pairs(sessions) do colorize(buf) end
+  if setup_done then return end
+  setup_done = true
+
+  vim.api.nvim_create_user_command('QfEdit', function()
+    M.open()
+  end, { desc = 'Edit quickfix entries as a buffer' })
+
+  local hijacking = false
+  vim.api.nvim_create_autocmd('BufWinEnter', {
+    callback = function(args)
+      if not config.hijack or hijacking or vim.bo[args.buf].buftype ~= 'quickfix' then return end
+      local win = vim.api.nvim_get_current_win()
+      if vim.api.nvim_win_get_buf(win) ~= args.buf then return end
+      vim.schedule(function()
+        if not config.hijack or hijacking or not qf_window(win) then return end
+        hijacking = true
+        local ok, err = pcall(function()
+          -- For horizontal, reuse the :copen window. Other layouts must
+          -- close it and create the requested split/float.
+          if config.layout == 'horizontal' then
+            M.open({ replace_win = win })
+          else
+            if not vim.api.nvim_win_is_valid(win) then return end
+            vim.api.nvim_win_close(win, true)
+            M.open()
+          end
+        end)
+        hijacking = false
+        if not ok then fail(err) end
+      end)
+    end,
+  })
+end
+
+return M
+)
+    local lhs = prefix or line
+    local separator_start = prefix and #prefix or nil
+    local path = lhs
+    local position = lhs:match(':%d+:%d+
+  vim.notify('qfedit: ' .. message, vim.log.levels.ERROR)
+end
+
+local function path_for(item)
+  if not item.bufnr or item.bufnr == 0 then return '' end
+  local name = vim.api.nvim_buf_get_name(item.bufnr)
+  if name == '' then return '' end
+  return vim.fn.fnamemodify(name, ':p')
+end
+
+local function render(item)
+  local path = path_for(item)
+  local pos = ''
+  if (item.lnum or 0) > 0 then
+    pos = ':' .. item.lnum
+    if (item.col or 0) > 0 then pos = pos .. ':' .. item.col end
+  end
+  local message = (item.text or ''):gsub('[\r\n]+', ' ')
+  if message ~= '' then return path .. pos .. ' | ' .. message end
+  return path .. pos
+end
+
+local function parse(line)
+  local lhs, message = line:match('^(.-) | (.*)$')
+  if not lhs then lhs, message = line, '' end
+  lhs = vim.trim(lhs)
+  local path, lnum, col = lhs:match('^(.*):(%d+):(%d+)$')
+  if not path then path, lnum = lhs:match('^(.*):(%d+)$') end
+  if not path then path = lhs end
+  if path == '' then return nil, 'missing filename: ' .. line end
+  return {
+    filename = path,
+    lnum = tonumber(lnum) or 1,
+    col = tonumber(col) or 1,
+    text = message,
+    valid = 1,
+  }
+end
+
+local function current(id)
+  return vim.fn.getqflist({ id = id, items = 1, changedtick = 1, title = 1, idx = 1 })
+end
+
+local function save(buf, quiet)
+  local session = sessions[buf]
+  if not session then return fail('unknown editor buffer') end
+  if saving[buf] then return end
+  if not vim.bo[buf].modified then return true end
+  local list = current(session.id)
+  if list.id ~= session.id then return fail('the original quickfix list no longer exists') end
+  if list.changedtick ~= session.tick then
+    return fail('quickfix list changed externally; use :QfEdit to reopen it (your edits were NOT overwritten)')
+  end
+
+  local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+  local pools = {}
+  for i, original in ipairs(session.lines) do
+    pools[original] = pools[original] or {}
+    table.insert(pools[original], vim.deepcopy(session.items[i]))
+  end
+
+  local output = {}
+  local saved_lines = {}
+  for _, line in ipairs(lines) do
+    if vim.trim(line) ~= '' then
+      local pool = pools[line]
+      local item
+      if pool and #pool > 0 then
+        item = table.remove(pool, 1)
+      else
+        local err
+        item, err = parse(line)
+        if not item then return fail(err) end
+      end
+      table.insert(output, item)
+      table.insert(saved_lines, line)
+    end
+  end
+
+  -- Replace the ORIGINAL quickfix list by ID rather than implicitly changing
+  -- whichever list happens to be active after opening this buffer.
+  local properties = { id = session.id, items = output, title = list.title }
+  if #output > 0 then properties.idx = math.max(1, math.min(list.idx, #output)) end
+  saving[buf] = true
+  local result = vim.fn.setqflist({}, 'r', properties)
+  saving[buf] = nil
+  if result ~= 0 then return fail('failed to update the quickfix list') end
+
+  local refreshed = current(session.id)
+  if refreshed.id ~= session.id then return fail('quickfix list disappeared after saving') end
+  session.tick = refreshed.changedtick
+  session.items = vim.deepcopy(refreshed.items)
+  session.lines = saved_lines
+  vim.bo[buf].modified = false
+  if not quiet then
+    vim.notify(('qfedit: saved %d entries'):format(#output))
+  end
+  return true
+end
+
+local function queue_save(buf)
+  if not config.autosave or pending[buf] or saving[buf] then return end
+  pending[buf] = true
+  vim.schedule(function()
+    pending[buf] = nil
+    if not vim.api.nvim_buf_is_valid(buf) or not vim.bo[buf].modified then return end
+    -- InsertLeave is emitted when typing stops; TextChanged captures dd, p,
+    -- :sort, etc. Never write while the user is actively inserting text.
+    local mode = vim.api.nvim_get_mode().mode
+    if mode:sub(1, 1) == 'i' or mode:sub(1, 1) == 'R' then return end
+    save(buf, true)
+  end)
+end
+
+function M.open(opts)
+  opts = opts or {}
+  local layout = opts.layout or config.layout
+  local replace_win = opts.replace_win
+  local qf = vim.fn.getqflist({ id = 0, items = 1, changedtick = 1, title = 1 })
+  if not qf.id or qf.id == 0 then return fail('no current quickfix list') end
+
+  local existing
+  for buf, session in pairs(sessions) do
+    if session.id == qf.id and vim.api.nvim_buf_is_valid(buf) then
+      existing = buf
+      break
+    end
+  end
+  if existing then
+    open_window(existing, layout, replace_win)
+    return existing
+  end
+
+  local buf = vim.api.nvim_create_buf(false, false)
+  open_window(buf, layout, replace_win)
+  vim.bo[buf].buftype = 'acwrite'
+  vim.bo[buf].bufhidden = 'hide'
+  vim.bo[buf].swapfile = false
+  vim.bo[buf].filetype = 'qfedit'
+  vim.api.nvim_buf_set_name(buf, ('qfedit://%d'):format(qf.id))
+
+  local lines = {}
+  for _, item in ipairs(qf.items) do table.insert(lines, render(item)) end
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+  vim.bo[buf].modified = false
+
+  sessions[buf] = {
+    id = qf.id,
+    tick = qf.changedtick,
+    items = vim.deepcopy(qf.items),
+    lines = vim.deepcopy(lines),
+  }
+
+  local group = vim.api.nvim_create_augroup('QfEdit_' .. buf, { clear = true })
+  vim.api.nvim_create_autocmd('BufWriteCmd', {
+    buffer = buf,
+    group = group,
+    callback = function() save(buf, false) end,
+  })
+  vim.api.nvim_create_autocmd({ 'TextChanged', 'InsertLeave' }, {
+    buffer = buf,
+    group = group,
+    callback = function() queue_save(buf) end,
+  })
+  vim.api.nvim_create_autocmd('BufWipeout', {
+    buffer = buf,
+    group = group,
+    callback = function() sessions[buf] = nil; pending[buf] = nil end,
+  })
+
+  vim.keymap.set('n', '<CR>', function()
+    local line = vim.api.nvim_get_current_line()
+    if vim.trim(line) == '' then return end
+    local item = parse(line)
+    if not item then return end
+    local target = vim.api.nvim_get_current_win()
+    if vim.api.nvim_win_get_config(target).relative ~= '' then
+      vim.api.nvim_win_close(target, true)
+    else
+      vim.cmd('wincmd p')
+    end
+    -- If the previous window was also an editor, create an ordinary
+    -- source window instead of clobbering a protected qfedit window.
+    if vim.bo[0].filetype == 'qfedit' then
+      vim.cmd('new')
+    end
+    vim.cmd('edit ' .. vim.fn.fnameescape(item.filename))
+    local nlines = vim.api.nvim_buf_line_count(0)
+    local row = math.max(1, math.min(item.lnum, nlines))
+    local text = vim.api.nvim_buf_get_lines(0, row - 1, row, false)[1] or ''
+    local col = math.max(0, math.min(item.col - 1, #text))
+    vim.api.nvim_win_set_cursor(0, { row, col })
+  end, { buffer = buf, desc = 'Open quickfix entry' })
+  return buf
+end
+
+function M.setup(opts)
+  opts = opts or {}
+  local merged = vim.tbl_deep_extend('force', vim.deepcopy(defaults), opts)
+  assert(type(merged.hijack) == 'boolean', 'qfedit: hijack must be boolean')
+  assert(type(merged.autosave) == 'boolean', 'qfedit: autosave must be boolean')
+  assert(vim.tbl_contains({ 'horizontal', 'vertical', 'float' }, merged.layout),
+    'qfedit: layout must be horizontal, vertical, or float')
+  config = merged
+  if setup_done then return end
+  setup_done = true
+
+  vim.api.nvim_create_user_command('QfEdit', function()
+    M.open()
+  end, { desc = 'Edit quickfix entries as a buffer' })
+
+  local hijacking = false
+  vim.api.nvim_create_autocmd('BufWinEnter', {
+    callback = function(args)
+      if not config.hijack or hijacking or vim.bo[args.buf].buftype ~= 'quickfix' then return end
+      local win = vim.api.nvim_get_current_win()
+      if vim.api.nvim_win_get_buf(win) ~= args.buf then return end
+      vim.schedule(function()
+        if not config.hijack or hijacking or not qf_window(win) then return end
+        hijacking = true
+        local ok, err = pcall(function()
+          -- For horizontal, reuse the :copen window. Other layouts must
+          -- close it and create the requested split/float.
+          if config.layout == 'horizontal' then
+            M.open({ replace_win = win })
+          else
+            if not vim.api.nvim_win_is_valid(win) then return end
+            vim.api.nvim_win_close(win, true)
+            M.open()
+          end
+        end)
+        hijacking = false
+        if not ok then fail(err) end
+      end)
+    end,
+  })
+end
+
+return M
+) or lhs:match(':%d+
+  vim.notify('qfedit: ' .. message, vim.log.levels.ERROR)
+end
+
+local function path_for(item)
+  if not item.bufnr or item.bufnr == 0 then return '' end
+  local name = vim.api.nvim_buf_get_name(item.bufnr)
+  if name == '' then return '' end
+  return vim.fn.fnamemodify(name, ':p')
+end
+
+local function render(item)
+  local path = path_for(item)
+  local pos = ''
+  if (item.lnum or 0) > 0 then
+    pos = ':' .. item.lnum
+    if (item.col or 0) > 0 then pos = pos .. ':' .. item.col end
+  end
+  local message = (item.text or ''):gsub('[\r\n]+', ' ')
+  if message ~= '' then return path .. pos .. ' | ' .. message end
+  return path .. pos
+end
+
+local function parse(line)
+  local lhs, message = line:match('^(.-) | (.*)$')
+  if not lhs then lhs, message = line, '' end
+  lhs = vim.trim(lhs)
+  local path, lnum, col = lhs:match('^(.*):(%d+):(%d+)$')
+  if not path then path, lnum = lhs:match('^(.*):(%d+)$') end
+  if not path then path = lhs end
+  if path == '' then return nil, 'missing filename: ' .. line end
+  return {
+    filename = path,
+    lnum = tonumber(lnum) or 1,
+    col = tonumber(col) or 1,
+    text = message,
+    valid = 1,
+  }
+end
+
+local function current(id)
+  return vim.fn.getqflist({ id = id, items = 1, changedtick = 1, title = 1, idx = 1 })
+end
+
+local function save(buf, quiet)
+  local session = sessions[buf]
+  if not session then return fail('unknown editor buffer') end
+  if saving[buf] then return end
+  if not vim.bo[buf].modified then return true end
+  local list = current(session.id)
+  if list.id ~= session.id then return fail('the original quickfix list no longer exists') end
+  if list.changedtick ~= session.tick then
+    return fail('quickfix list changed externally; use :QfEdit to reopen it (your edits were NOT overwritten)')
+  end
+
+  local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+  local pools = {}
+  for i, original in ipairs(session.lines) do
+    pools[original] = pools[original] or {}
+    table.insert(pools[original], vim.deepcopy(session.items[i]))
+  end
+
+  local output = {}
+  local saved_lines = {}
+  for _, line in ipairs(lines) do
+    if vim.trim(line) ~= '' then
+      local pool = pools[line]
+      local item
+      if pool and #pool > 0 then
+        item = table.remove(pool, 1)
+      else
+        local err
+        item, err = parse(line)
+        if not item then return fail(err) end
+      end
+      table.insert(output, item)
+      table.insert(saved_lines, line)
+    end
+  end
+
+  -- Replace the ORIGINAL quickfix list by ID rather than implicitly changing
+  -- whichever list happens to be active after opening this buffer.
+  local properties = { id = session.id, items = output, title = list.title }
+  if #output > 0 then properties.idx = math.max(1, math.min(list.idx, #output)) end
+  saving[buf] = true
+  local result = vim.fn.setqflist({}, 'r', properties)
+  saving[buf] = nil
+  if result ~= 0 then return fail('failed to update the quickfix list') end
+
+  local refreshed = current(session.id)
+  if refreshed.id ~= session.id then return fail('quickfix list disappeared after saving') end
+  session.tick = refreshed.changedtick
+  session.items = vim.deepcopy(refreshed.items)
+  session.lines = saved_lines
+  vim.bo[buf].modified = false
+  if not quiet then
+    vim.notify(('qfedit: saved %d entries'):format(#output))
+  end
+  return true
+end
+
+local function queue_save(buf)
+  if not config.autosave or pending[buf] or saving[buf] then return end
+  pending[buf] = true
+  vim.schedule(function()
+    pending[buf] = nil
+    if not vim.api.nvim_buf_is_valid(buf) or not vim.bo[buf].modified then return end
+    -- InsertLeave is emitted when typing stops; TextChanged captures dd, p,
+    -- :sort, etc. Never write while the user is actively inserting text.
+    local mode = vim.api.nvim_get_mode().mode
+    if mode:sub(1, 1) == 'i' or mode:sub(1, 1) == 'R' then return end
+    save(buf, true)
+  end)
+end
+
+function M.open(opts)
+  opts = opts or {}
+  local layout = opts.layout or config.layout
+  local replace_win = opts.replace_win
+  local qf = vim.fn.getqflist({ id = 0, items = 1, changedtick = 1, title = 1 })
+  if not qf.id or qf.id == 0 then return fail('no current quickfix list') end
+
+  local existing
+  for buf, session in pairs(sessions) do
+    if session.id == qf.id and vim.api.nvim_buf_is_valid(buf) then
+      existing = buf
+      break
+    end
+  end
+  if existing then
+    open_window(existing, layout, replace_win)
+    return existing
+  end
+
+  local buf = vim.api.nvim_create_buf(false, false)
+  open_window(buf, layout, replace_win)
+  vim.bo[buf].buftype = 'acwrite'
+  vim.bo[buf].bufhidden = 'hide'
+  vim.bo[buf].swapfile = false
+  vim.bo[buf].filetype = 'qfedit'
+  vim.api.nvim_buf_set_name(buf, ('qfedit://%d'):format(qf.id))
+
+  local lines = {}
+  for _, item in ipairs(qf.items) do table.insert(lines, render(item)) end
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+  vim.bo[buf].modified = false
+
+  sessions[buf] = {
+    id = qf.id,
+    tick = qf.changedtick,
+    items = vim.deepcopy(qf.items),
+    lines = vim.deepcopy(lines),
+  }
+
+  local group = vim.api.nvim_create_augroup('QfEdit_' .. buf, { clear = true })
+  vim.api.nvim_create_autocmd('BufWriteCmd', {
+    buffer = buf,
+    group = group,
+    callback = function() save(buf, false) end,
+  })
+  vim.api.nvim_create_autocmd({ 'TextChanged', 'InsertLeave' }, {
+    buffer = buf,
+    group = group,
+    callback = function() queue_save(buf) end,
+  })
+  vim.api.nvim_create_autocmd('BufWipeout', {
+    buffer = buf,
+    group = group,
+    callback = function() sessions[buf] = nil; pending[buf] = nil end,
+  })
+
+  vim.keymap.set('n', '<CR>', function()
+    local line = vim.api.nvim_get_current_line()
+    if vim.trim(line) == '' then return end
+    local item = parse(line)
+    if not item then return end
+    local target = vim.api.nvim_get_current_win()
+    if vim.api.nvim_win_get_config(target).relative ~= '' then
+      vim.api.nvim_win_close(target, true)
+    else
+      vim.cmd('wincmd p')
+    end
+    -- If the previous window was also an editor, create an ordinary
+    -- source window instead of clobbering a protected qfedit window.
+    if vim.bo[0].filetype == 'qfedit' then
+      vim.cmd('new')
+    end
+    vim.cmd('edit ' .. vim.fn.fnameescape(item.filename))
+    local nlines = vim.api.nvim_buf_line_count(0)
+    local row = math.max(1, math.min(item.lnum, nlines))
+    local text = vim.api.nvim_buf_get_lines(0, row - 1, row, false)[1] or ''
+    local col = math.max(0, math.min(item.col - 1, #text))
+    vim.api.nvim_win_set_cursor(0, { row, col })
+  end, { buffer = buf, desc = 'Open quickfix entry' })
+  return buf
+end
+
+function M.setup(opts)
+  opts = opts or {}
+  local merged = vim.tbl_deep_extend('force', vim.deepcopy(defaults), opts)
+  assert(type(merged.hijack) == 'boolean', 'qfedit: hijack must be boolean')
+  assert(type(merged.autosave) == 'boolean', 'qfedit: autosave must be boolean')
+  assert(vim.tbl_contains({ 'horizontal', 'vertical', 'float' }, merged.layout),
+    'qfedit: layout must be horizontal, vertical, or float')
+  config = merged
+  if setup_done then return end
+  setup_done = true
+
+  vim.api.nvim_create_user_command('QfEdit', function()
+    M.open()
+  end, { desc = 'Edit quickfix entries as a buffer' })
+
+  local hijacking = false
+  vim.api.nvim_create_autocmd('BufWinEnter', {
+    callback = function(args)
+      if not config.hijack or hijacking or vim.bo[args.buf].buftype ~= 'quickfix' then return end
+      local win = vim.api.nvim_get_current_win()
+      if vim.api.nvim_win_get_buf(win) ~= args.buf then return end
+      vim.schedule(function()
+        if not config.hijack or hijacking or not qf_window(win) then return end
+        hijacking = true
+        local ok, err = pcall(function()
+          -- For horizontal, reuse the :copen window. Other layouts must
+          -- close it and create the requested split/float.
+          if config.layout == 'horizontal' then
+            M.open({ replace_win = win })
+          else
+            if not vim.api.nvim_win_is_valid(win) then return end
+            vim.api.nvim_win_close(win, true)
+            M.open()
+          end
+        end)
+        hijacking = false
+        if not ok then fail(err) end
+      end)
+    end,
+  })
+end
+
+return M
+)
+    if position then path = lhs:sub(1, #lhs - #position) end
+    local directory_end = path:match('^.*()/') or path:match('^.*()\\')
+    local function mark(a, b, group)
+      if a < b then
+        vim.api.nvim_buf_set_extmark(buf, ns, row, a, {
+          end_col = b, hl_group = group, priority = 110
+        })
+      end
+    end
+    if directory_end then
+      mark(0, directory_end, 'QfEditDirectory')
+      mark(directory_end, #path, 'QfEditFilename')
+    else
+      mark(0, #path, 'QfEditFilename')
+    end
+    mark(#path, #lhs, 'QfEditPosition')
+    if separator_start then
+      mark(separator_start, separator_start + 3, 'QfEditSeparator')
+      local group = 'QfEditMessage'
+      -- Prefer structured quickfix severity for unchanged lines.
+      local original = session and session.items[i]
+      if original and session.lines[i] == line then
+        group = ({ E = 'QfEditError', W = 'QfEditWarning',
+          I = 'QfEditInfo', N = 'QfEditHint' })[original.type] or group
+      end
+      local lower = (message or ''):lower()
+      if group == 'QfEditMessage' then
+        if lower:match('^error[:%s]') then group = 'QfEditError'
+        elseif lower:match('^warn%a*[:%s]') then group = 'QfEditWarning'
+        elseif lower:match('^info[:%s]') then group = 'QfEditInfo' end
+      end
+      mark(separator_start + 3, #line, group)
+    end
+  end
 end
 
 local function fail(message)
