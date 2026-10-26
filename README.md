@@ -6,7 +6,8 @@ Edit the *entries* of a Neovim quickfix list using ordinary buffer editing, like
 
 The repository is `donatomartin/qfedit.nvim`. No external dependencies are required.
 
-### Native `vim.pack` (Neovim 0.12+)
+<details>
+<summary><strong>Native vim.pack (Neovim 0.12+)</strong></summary>
 
 ```lua
 vim.pack.add({
@@ -16,20 +17,29 @@ vim.pack.add({
 require('qfedit').setup()
 ```
 
-### lazy.nvim
+</details>
+
+<details>
+<summary><strong>lazy.nvim</strong></summary>
 
 ```lua
 {
   'donatomartin/qfedit.nvim',
-  config = function()
-    require('qfedit').setup()
-  end,
+  opts = {
+    hijack = true,
+    layout = 'horizontal',
+    autosave = true,
+    highlight = true,
+  },
 }
 ```
 
-For a lazy.nvim plugin spec, add the table above to your plugin list or return it from a file under `lua/plugins/`.
+Add this spec to your lazy.nvim plugin list or a file under `lua/plugins/`.
 
-### packer.nvim
+</details>
+
+<details>
+<summary><strong>packer.nvim</strong></summary>
 
 ```lua
 use {
@@ -40,9 +50,12 @@ use {
 }
 ```
 
-Place this inside your `require('packer').startup(function(use) ... end)` configuration, then run `:PackerSync`.
+Add inside `require('packer').startup(function(use) ... end)` and run `:PackerSync`.
 
-### vim-plug
+</details>
+
+<details>
+<summary><strong>vim-plug</strong></summary>
 
 In your `init.vim`:
 
@@ -56,11 +69,9 @@ lua require('qfedit').setup()
 
 Run `:PlugInstall` after updating the plugin list.
 
-### Manual installation
+</details>
 
-Clone the repository into a directory on Neovim's `runtimepath`, or copy `lua/qfedit/init.lua` and `plugin/qfedit.lua` to the matching paths in your Neovim configuration.
-
-**Note:** `plugin/qfedit.lua` calls `setup()` automatically. If you provide custom options, call `require('qfedit').setup({...})` in your configuration. The setup function can be called again safely to replace options without registering duplicate commands.
+**Help inside Neovim:** run `:help qfedit`, `:help :QfEdit`, or `:help qfedit-configuration`. Search within the help buffer using `/` as usual. If Neovim cannot find the help tags, run `:helptags ALL` once.
 
 ## Configuration
 
