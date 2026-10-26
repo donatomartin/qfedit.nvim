@@ -12,9 +12,18 @@ local function qf_window(win)
   return vim.bo[buf].buftype == 'quickfix'
 end
 
+local function protect_window(win)
+  -- :cfdo, :cdo, :cnext and similar commands can reuse the current
+  -- window for source buffers. A qfedit window must never be that window.
+  -- 'winfixbuf' makes source-buffer switching fail instead of replacing qfedit.
+  vim.wo[win].winfixbuf = true
+end
+
 local function open_window(buf, layout, replace_win)
   if replace_win and vim.api.nvim_win_is_valid(replace_win) then
+    vim.wo[replace_win].winfixbuf = false
     vim.api.nvim_win_set_buf(replace_win, buf)
+    protect_window(replace_win)
     return replace_win
   end
   if layout == 'vertical' then
@@ -29,12 +38,15 @@ local function open_window(buf, layout, replace_win)
       row = math.max(0, math.floor((vim.o.lines - height) / 2)),
       col = math.max(0, math.floor((vim.o.columns - width) / 2)),
     })
+    protect_window(win)
     return win
   else
     vim.cmd('botright split')
     vim.api.nvim_win_set_buf(0, buf)
   end
-  return vim.api.nvim_get_current_win()
+  local win = vim.api.nvim_get_current_win()
+  protect_window(win)
+  return win
 end
 
 local function fail(message)
@@ -218,6 +230,11 @@ function M.open(opts)
       vim.api.nvim_win_close(target, true)
     else
       vim.cmd('wincmd p')
+    end
+    -- If the previous window was also an editor, create an ordinary
+    -- source window instead of clobbering a protected qfedit window.
+    if vim.bo[0].filetype == 'qfedit' then
+      vim.cmd('new')
     end
     vim.cmd('edit ' .. vim.fn.fnameescape(item.filename))
     local nlines = vim.api.nvim_buf_line_count(0)
