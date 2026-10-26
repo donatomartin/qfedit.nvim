@@ -6,6 +6,20 @@ Edit the *entries* of a Neovim quickfix list using ordinary buffer editing, like
 
 For a local plugin, copy `lua/qfedit/init.lua` and `plugin/qfedit.lua` into your `~/.config/nvim/` directory. Alternatively, put this directory on Neovim's `runtimepath` and invoke `require('qfedit').setup()` once.
 
+## Configuration
+
+```lua
+require('qfedit').setup({
+  hijack = true,          -- replace native quickfix windows opened by :copen
+  layout = 'horizontal',  -- 'horizontal', 'vertical', or 'float'
+  autosave = true,        -- sync changes when returning to Normal mode
+})
+```
+
+All values shown are defaults. Setting `hijack = false` retains the original behavior: native `:copen` works normally and `:QfEdit` opens the editable buffer explicitly.
+
+`autosave = true` saves after Normal-mode buffer modifications and upon `InsertLeave`. `:w` remains available for manual synchronization. External quickfix modifications are protected by a changedtick conflict check.
+
 ## Usage
 
 1. Populate quickfix (`:vimgrep`, `:make`, `:cexpr`, Telescope, etc.).
