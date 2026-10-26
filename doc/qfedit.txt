@@ -1,0 +1,140 @@
+*qfedit.txt*  Editable quickfix lists for Neovim
+
+qfedit.nvim                                                   *qfedit*
+
+Edit quickfix entries in an ordinary Neovim buffer without changing the
+referenced source files. Use standard motions to delete, paste, reorder,
+and add file paths, then write the edited list back into quickfix.
+
+==============================================================================
+CONTENTS                                                  *qfedit-contents*
+
+1. Introduction....................|qfedit-introduction|
+2. Commands........................|qfedit-commands|
+3. Configuration....................|qfedit-configuration|
+4. Buffer editing...................|qfedit-editing|
+5. Highlight groups.................|qfedit-highlights|
+6. Limitations......................|qfedit-limitations|
+
+==============================================================================
+1. INTRODUCTION                                        *qfedit-introduction*
+
+A quickfix list can be populated with |:vimgrep|, |:make|, |:cexpr|, or other
+commands and plugins. qfedit exposes its entries as editable text.
+
+With 'hijack' enabled, opening the normal quickfix window using |:copen|
+opens qfedit instead. Alternatively, run |:QfEdit| explicitly.
+
+==============================================================================
+2. COMMANDS                                                *qfedit-commands*
+
+:QfEdit                                                           *:QfEdit*
+    Open the current quickfix list as an editable buffer.
+
+:w
+    In a qfedit buffer, synchronize changed entries to the underlying
+    quickfix list. This does not write any source file.
+
+<CR>                                                    *qfedit-enter*
+    In a qfedit buffer, open the file at the current entry.
+
+==============================================================================
+3. CONFIGURATION                                      *qfedit-configuration*
+
+Call setup() in your configuration:
+
+>lua
+    require('qfedit').setup({
+      hijack = true,
+      layout = 'horizontal',
+      autosave = true,
+      highlight = true,
+    })
+<
+
+All options are optional.
+
+hijack                                                    *qfedit-hijack*
+    Type: boolean. Default: true.
+    Replace the native quickfix window opened by :copen with qfedit.
+    When false, :copen is unmodified and :QfEdit opens qfedit explicitly.
+
+layout                                                    *qfedit-layout*
+    Type: string. Default: "horizontal".
+    Allowed values: "horizontal", "vertical", "float".
+    Controls the layout of the qfedit window.
+
+autosave                                                *qfedit-autosave*
+    Type: boolean. Default: true.
+    Synchronize Normal-mode changes and changes on leaving Insert mode.
+    When false, use :w to synchronize manually.
+
+highlight                                              *qfedit-highlight*
+    Type: boolean. Default: true.
+    Highlight directories, filenames, line/column positions and diagnostic
+    messages with extmarks. Highlighting does not change the buffer text.
+    See |qfedit-highlights|.
+
+==============================================================================
+4. BUFFER EDITING                                          *qfedit-editing*
+
+A line can contain a file path, line number and column, and message:
+
+>
+    src/main/java/Application.java
+    src/main/java/UserService.java:42:5
+    src/main/java/UserService.java:42:5 | Error: example
+<
+
+Normal Vim editing commands work:
+
+    dd      Remove an entry.
+    yy      Yank an entry.
+    p       Paste an entry.
+    o       Add a new line for an entry.
+    :sort   Sort entries.
+    :w      Save edits back to quickfix.
+
+An unchanged line retains the original quickfix metadata where possible.
+A modified or newly added line is parsed into a new quickfix entry.
+Empty or whitespace-only lines are ignored.
+
+If an external command changes the underlying quickfix list, writing the
+editor buffer is rejected rather than silently overwriting those changes.
+
+==============================================================================
+5. HIGHLIGHT GROUPS                                      *qfedit-highlights*
+
+The default highlight groups link to colorscheme-defined Neovim groups:
+
+    QfEditDirectory  Comment
+    QfEditFilename   Directory
+    QfEditPosition   Number
+    QfEditSeparator  Delimiter
+    QfEditMessage    Normal
+    QfEditError      DiagnosticError
+    QfEditWarning    DiagnosticWarn
+    QfEditInfo       DiagnosticInfo
+    QfEditHint       DiagnosticHint
+
+Customize them with |nvim_set_hl()|:
+
+>lua
+    vim.api.nvim_set_hl(0, 'QfEditFilename', {
+      fg = '#89B4FA',
+      bold = true,
+    })
+<
+
+==============================================================================
+6. LIMITATIONS                                            *qfedit-limitations*
+
+- Editing an entry's text discards additional metadata associated with that
+  original item.
+- Entries with unusual path suffixes such as ":number", or literal " | "
+  in filenames, can be ambiguous.
+- Only the global quickfix list is supported; location lists are not.
+- Quickfix lists are not automatically persisted across editor restarts.
+
+==============================================================================
+vim:tw=78:ts=8:ft=help:norl:
