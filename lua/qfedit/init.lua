@@ -244,21 +244,28 @@ function M.setup(opts)
     M.open()
   end, { desc = 'Edit quickfix entries as a buffer' })
 
-  vim.api.nvim_create_autocmd('FileType', {
-    pattern = 'qf',
+  local hijacking = false
+  vim.api.nvim_create_autocmd('BufWinEnter', {
     callback = function(args)
-      if not config.hijack then return end
-      local qf_buf = args.buf
+      if not config.hijack or hijacking or vim.bo[args.buf].buftype ~= 'quickfix' then return end
+      local win = vim.api.nvim_get_current_win()
+      if vim.api.nvim_win_get_buf(win) ~= args.buf then return end
       vim.schedule(function()
-        if not config.hijack then return end
-        -- Replace native :copen's window, rather than opening another split.
-        for _, win in ipairs(vim.api.nvim_list_wins()) do
-          if vim.api.nvim_win_get_buf(win) == qf_buf and qf_window(win) then
-            vim.api.nvim_win_call(win, function()
-              M.open({ replace_win = win })
-            end)
+        if not config.hijack or hijacking or not qf_window(win) then return end
+        hijacking = true
+        local ok, err = pcall(function()
+          -- For horizontal, reuse the :copen window. Other layouts must
+          -- close it and create the requested split/float.
+          if config.layout == 'horizontal' then
+            M.open({ replace_win = win })
+          else
+            if not vim.api.nvim_win_is_valid(win) then return end
+            vim.api.nvim_win_close(win, true)
+            M.open()
           end
-        end
+        end)
+        hijacking = false
+        if not ok then fail(err) end
       end)
     end,
   })
