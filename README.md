@@ -4,7 +4,63 @@ Edit the *entries* of a Neovim quickfix list using ordinary buffer editing, like
 
 ## Installation
 
-For a local plugin, copy `lua/qfedit/init.lua` and `plugin/qfedit.lua` into your `~/.config/nvim/` directory. Alternatively, put this directory on Neovim's `runtimepath` and invoke `require('qfedit').setup()` once.
+The repository is `donatomartin/qfedit.nvim`. No external dependencies are required.
+
+### Native `vim.pack` (Neovim 0.12+)
+
+```lua
+vim.pack.add({
+  'https://github.com/donatomartin/qfedit.nvim',
+})
+
+require('qfedit').setup()
+```
+
+### lazy.nvim
+
+```lua
+{
+  'donatomartin/qfedit.nvim',
+  config = function()
+    require('qfedit').setup()
+  end,
+}
+```
+
+For a lazy.nvim plugin spec, add the table above to your plugin list or return it from a file under `lua/plugins/`.
+
+### packer.nvim
+
+```lua
+use {
+  'donatomartin/qfedit.nvim',
+  config = function()
+    require('qfedit').setup()
+  end,
+}
+```
+
+Place this inside your `require('packer').startup(function(use) ... end)` configuration, then run `:PackerSync`.
+
+### vim-plug
+
+In your `init.vim`:
+
+```vim
+call plug#begin()
+Plug 'donatomartin/qfedit.nvim'
+call plug#end()
+
+lua require('qfedit').setup()
+```
+
+Run `:PlugInstall` after updating the plugin list.
+
+### Manual installation
+
+Clone the repository into a directory on Neovim's `runtimepath`, or copy `lua/qfedit/init.lua` and `plugin/qfedit.lua` to the matching paths in your Neovim configuration.
+
+**Note:** `plugin/qfedit.lua` calls `setup()` automatically. If you provide custom options, call `require('qfedit').setup({...})` in your configuration. The setup function can be called again safely to replace options without registering duplicate commands.
 
 ## Configuration
 
